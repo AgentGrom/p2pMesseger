@@ -10,32 +10,24 @@ class P2PWorker:
         self.host = host
         self.port = port
         self.user_id = user_id
-        # Храним сокеты по никнеймам для мгновенного доступа
-        self.active_connections = {} # { "Nick": writer }
+        # Храним сокеты по НИКНЕЙМАМ
+        self.active_connections = {} 
         self.contacts = {} 
 
     async def start(self):
         server = await asyncio.start_server(self.handle_incoming, self.host, self.port)
-        
-        # Генерируем строку ключа для вывода в консоль
         pub_key_str = base64.b64encode(self.client.public_key.encode()).decode()
-        
-        print(f"\n" + "="*50)
-        print(f"[SYSTEM] Узел {self.user_id} запущен!")
-        print(f"[SYSTEM] Порт: {self.port}")
-        print(f"[SYSTEM] Твой публичный ключ (передай его другу):")
-        print(f"{pub_key_str}") # Вот здесь ключ выводится в консоль
-        print("="*50 + "\n")
+        print(f"\n[SYSTEM] Узел {self.user_id} запущен!")
+        print(f"[SYSTEM] Ключ: {pub_key_str}\n" + "="*30)
         
         asyncio.create_task(self.cleanup_contacts())
-        
         async with server:
             await server.serve_forever()
 
     async def handle_incoming(self, reader, writer):
         peer = writer.get_extra_info('peername')
         peer_ip = peer[0]
-        current_nickname = None # Никнейм собеседника в этой сессии
+        current_nick = None
 
         try:
             while True:
@@ -43,45 +35,44 @@ class P2PWorker:
                 if not data: break
                 
                 msg_dict = json.loads(data.decode())
-                nickname = msg_dict.get("sender_id")
+                sender_nick = msg_dict.get("sender_id")
                 
-                if nickname:
-                    current_nickname = nickname
-                    # Привязываем этот сокет к нику, чтобы отвечать в него же
-                    self.active_connections[nickname] = writer
+                if sender_nick:
+                    current_nick = sender_nick
+                    # ВАЖНО: Привязываем входящий сокет к нику
+                    self.active_connections[sender_nick] = writer
                     
-                    # Обновляем инфо в контактах
-                    self.contacts[nickname] = {
+                    # Обновляем контакт (всегда используем ник как главный ID)
+                    self.contacts[sender_nick] = {
                         "ip": peer_ip,
                         "port": msg_dict.get("sender_listen_port", peer[1]),
                         "pub_key": msg_dict.get("sender_pub_key"),
                         "last_seen": time.time()
                     }
-                    # Удаляем временный контакт, если был
                     self.contacts.pop(f"pending_{peer_ip}", None)
 
-                    # Если это рукопожатие, подтверждаем
+                    # Авто-ответ на рукопожатие
                     if msg_dict.get("type") == "handshake":
-                        resp = self.create_payload("ACK", nickname, msg_dict["sender_pub_key"], "handshake_reply")
+                        resp = self.create_payload("Handshake ACK", sender_nick, msg_dict["sender_pub_key"], "handshake_reply")
                         writer.write(resp)
                         await writer.drain()
 
                 if msg_dict.get("type") == "text":
                     msg = P2PMessage(**msg_dict)
+                    # Дешифруем, используя ник как ID сессии
                     decrypted = self.client.decrypt_symmetric(
-                        msg.sender_id, base64.b64decode(msg.sender_pub_key), msg.encrypted_payload
+                        sender_nick, base64.b64decode(msg.sender_pub_key), msg.encrypted_payload
                     )
-                    print(f"\n[{msg.sender_id}]: {decrypted}")
+                    print(f"\n[{sender_nick}]: {decrypted}")
                     print(f"[{self.user_id}] > ", end="", flush=True)
 
-        except Exception as e:
-            print(f"\n[!] Ошибка в соединении: {e}")
+        except Exception: pass
         finally:
-            if current_nickname:
-                self.active_connections.pop(current_nickname, None)
+            if current_nick: self.active_connections.pop(current_nick, None)
             writer.close()
 
     def create_payload(self, text, target_id, target_pub_key, msg_type="text"):
+        # Используем target_id (ник) для ядра, чтобы сессия не сбрасывалась
         encrypted = self.client.encrypt_symmetric(target_id, base64.b64decode(target_pub_key), text)
         payload = P2PMessage(
             sender_id=self.user_id,
@@ -94,46 +85,49 @@ class P2PWorker:
 
     async def send_to_contact(self, alias: str, text: str):
         if alias not in self.contacts:
-            print(f"[!] Ошибка: Контакт '{alias}' не найден!"); return
+            print(f"[!] Контакт {alias} не найден"); return
         
         c = self.contacts[alias]
-        # ВАЖНО: Если у нас уже есть активный сокет для этого НИКА, используем его
-        if alias in self.active_connections:
+        
+        # ГЛАВНОЕ: Ищем уже открытый сокет (неважно, кто его открыл)
+        writer = self.active_connections.get(alias)
+        
+        if writer and not writer.is_closing():
             try:
-                writer = self.active_connections[alias]
                 packet = self.create_payload(text, alias, c["pub_key"], "text")
                 writer.write(packet)
                 await writer.drain()
-                return
+                return # Успешно отправили в существующий канал
             except Exception:
                 self.active_connections.pop(alias, None)
 
-        # Если сокета нет, пробуем создать по IP (как раньше)
+        # Если старого канала нет, создаем новый
         await self.send_message(c["ip"], c["port"], c["pub_key"], text, is_handshake=False, target_name=alias)
 
-    async def send_message(self, target_ip: str, target_port: int, target_pub_key_b64: str, text: str, is_handshake=True, target_name=None):
-        # Если мы знаем ник, проверяем сокет
-        if target_name and target_name in self.active_connections:
-            writer = self.active_connections[target_name]
-        else:
-            try:
-                reader, writer = await asyncio.open_connection(target_ip, target_port)
-                asyncio.create_task(self.handle_incoming(reader, writer))
-                # Временно записываем сокет, пока не подтвержден ник
-                self.active_connections[target_name or f"pending_{target_ip}"] = writer
-            except Exception as e:
-                print(f"[!] Ошибка соединения: {e}"); return
+    async def send_message(self, ip, port, key, text, is_handshake=True, target_name=None):
+        try:
+            reader, writer = await asyncio.open_connection(ip, port)
+            # Временно вешаем сокет на IP или имя
+            conn_id = target_name or f"pending_{ip}"
+            self.active_connections[conn_id] = writer
+            asyncio.create_task(self.handle_incoming(reader, writer))
+            
+            # Если это первый коннект, создаем временный контакт
+            if is_handshake and not target_name:
+                self.contacts[conn_id] = {"ip": ip, "port": port, "pub_key": key, "last_seen": time.time()}
 
-        msg_type = "handshake" if is_handshake else "text"
-        packet = self.create_payload(text, target_name or "unknown", target_pub_key_b64, msg_type)
-        writer.write(packet)
-        await writer.drain()
+            msg_type = "handshake" if is_handshake else "text"
+            packet = self.create_payload(text, target_name or "unknown", key, msg_type)
+            writer.write(packet)
+            await writer.drain()
+        except Exception as e:
+            print(f"[!] Ошибка подключения: {e}")
 
     async def cleanup_contacts(self):
         while True:
             await asyncio.sleep(60)
             now = time.time()
-            to_delete = [n for n, info in self.contacts.items() if now - info.get('last_seen', 0) > 300]
+            to_delete = [n for n, i in self.contacts.items() if now - i['last_seen'] > 300]
             for n in to_delete:
                 self.contacts.pop(n, None)
                 self.active_connections.pop(n, None)
