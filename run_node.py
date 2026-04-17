@@ -3,50 +3,62 @@ import sys
 from client.p2p_worker import P2PWorker
 
 async def main():
-    print("--- P2P Messenger Test Node ---")
+    print("--- P2P Messenger Node ---")
+    user_id = input("Твой ник (напр. Alice): ").strip()
+    port = int(input("Твой порт (напр. 8001): ").strip())
     
-    # 1. Настройка текущего узла
-    try:
-        port = int(input("Введите порт для этого узла (например, 8001): "))
-        user_id = input("Введите ваш ник: ")
-    except ValueError:
-        print("Ошибка: Порт должен быть числом.")
-        return
-
-    node = P2PWorker("0.0.0.0", port, user_id)
-
-    # Запускаем серверную часть в фоновом режиме
-    server_task = asyncio.create_task(node.start())
+    worker = P2PWorker("0.0.0.0", port, user_id)
     
-    # Даем серверу немного времени на запуск
-    await asyncio.sleep(0.5)
+    # Запускаем сервер в фоне
+    server_task = asyncio.create_task(worker.start())
 
-    print("\nКоманды:")
-    print("1. send - отправить сообщение")
-    print("2. exit - выйти")
+    print("\nКОМАНДЫ:")
+    print("1. connect <ip> <port> <key>  -- Подключиться к новому другу")
+    print("2. send <ник> <сообщение>     -- Отправить сообщение по нику")
+    print("3. exit                       -- Выход")
+    print("-" * 30)
 
     try:
         while True:
-            cmd = await asyncio.to_thread(input, f"\n[{user_id}] > ")
+            # Читаем ввод пользователя асинхронно
+            cmd_line = await asyncio.to_thread(input, f"[{user_id}] > ")
+            parts = cmd_line.strip().split(" ", 3)
             
-            if cmd.lower() == "send":
-                target_ip = input("IP получателя (для теста 127.0.0.1): ")
-                target_port = int(input("Порт получателя: "))
-                target_key = input("Публичный ключ получателя (Base64): ")
-                text = input("Сообщение: ")
+            if not parts or not parts[0]:
+                continue
                 
-                await node.send_message(target_ip, target_port, target_key, text)
-            
-            elif cmd.lower() == "exit":
-                print("Выход...")
+            command = parts[0].lower()
+
+            if command == "exit":
                 break
-    except KeyboardInterrupt:
-        pass
+
+            elif command == "connect":
+                if len(parts) < 4:
+                    print("[!] Юзай: connect <ip> <port> <pub_key>")
+                    continue
+                ip, t_port, key = parts[1], int(parts[2]), parts[3]
+                # Шлем приветствие, чтобы другой узел нас узнал
+                await worker.send_message(ip, t_port, key, "Привет! Давай общаться.")
+                print("[*] Попытка подключения отправлена...")
+
+            elif command == "send":
+                if len(parts) < 3:
+                    print("[!] Юзай: send <ник> <сообщение>")
+                    continue
+                alias, text = parts[1], " ".join(parts[2:])
+                await worker.send_to_contact(alias, text)
+
+            else:
+                print("[?] Неизвестная команда")
+
+    except Exception as e:
+        print(f"[!] Ошибка: {e}")
     finally:
+        print("[*] Выключение...")
         server_task.cancel()
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        sys.exit(0)
+        pass
