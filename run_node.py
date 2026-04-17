@@ -33,8 +33,8 @@ async def main():
                     print("[!] Юзай: connect <ip> <port> <pub_key>")
                     continue
                 ip, t_port, key = parts[1], int(parts[2]), parts[3]
-                await worker.send_message(ip, t_port, key, "Запрос на соединение")
-                print(f"[*] Запрос отправлен на {ip}:{t_port}. Ждем ответа...")
+                await worker.send_message(ip, t_port, key, "Запрос на соединение", is_handshake=True)
+                print(f"[*] Инициализация связи с {ip}...")
 
             elif cmd == "list":
                 print("\n--- ТВОИ КОНТАКТЫ ---")
@@ -49,7 +49,8 @@ async def main():
                 if len(parts) < 3:
                     print("[!] Юзай: send <ник> <сообщение>")
                     continue
-                await worker.send_to_contact(parts[1], parts[2])
+                alias, text = parts[1], " ".join(parts[2:])
+                await worker.send_to_contact(alias, text)
 
     except Exception as e:
         print(f"[!] Ошибка: {e}")
