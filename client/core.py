@@ -11,6 +11,12 @@ class Session(BaseModel):
     shared_key: bytes
     last_activity: float
 
+class P2PMessage(BaseModel):
+    sender_id: str          
+    sender_pub_key: str     
+    encrypted_payload: str  
+    type: str = "text"
+
 class P2PClient:
     def __init__(self):
         self.private_key = PrivateKey.generate()
