@@ -16,8 +16,19 @@ class P2PWorker:
 
     async def start(self):
         server = await asyncio.start_server(self.handle_incoming, self.host, self.port)
+        
+        # Генерируем строку ключа для вывода в консоль
+        pub_key_str = base64.b64encode(self.client.public_key.encode()).decode()
+        
+        print(f"\n" + "="*50)
+        print(f"[SYSTEM] Узел {self.user_id} запущен!")
+        print(f"[SYSTEM] Порт: {self.port}")
+        print(f"[SYSTEM] Твой публичный ключ (передай его другу):")
+        print(f"{pub_key_str}") # Вот здесь ключ выводится в консоль
+        print("="*50 + "\n")
+        
         asyncio.create_task(self.cleanup_contacts())
-        print(f"\n[SYSTEM] Узел {self.user_id} запущен на порту {self.port}")
+        
         async with server:
             await server.serve_forever()
 
