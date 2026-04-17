@@ -11,33 +11,28 @@ class P2PWorker:
         self.port = port
         self.user_id = user_id
         self.active_connections = {}
-        # Контакты теперь хранят время последнего сообщения
         self.contacts = {} # { "Nick": {"ip": "..", "port": .., "pub_key": "..", "last_seen": timestamp} }
 
     async def start(self):
         server = await asyncio.start_server(self.handle_incoming, self.host, self.port)
-        # Запускаем фоновую очистку старых контактов
         asyncio.create_task(self.cleanup_contacts())
-        
         pub_key_str = base64.b64encode(self.client.public_key.encode()).decode()
-        print(f"\n[SYSTEM] Узел {self.user_id} на порту {self.port}")
-        print(f"[SYSTEM] Ключ: {pub_key_str}")
+        print(f"\n[SYSTEM] Узел {self.user_id} запущен. Ключ: {pub_key_str}")
         async with server:
             await server.serve_forever()
 
     async def cleanup_contacts(self):
-        """Раз в минуту проверяет, кто не писал нам более 5 минут"""
         while True:
             await asyncio.sleep(60)
             now = time.time()
-            to_delete = [name for name, info in self.contacts.items() 
-                         if now - info['last_seen'] > 300] # 300 сек = 5 мин
-            for name in to_delete:
-                print(f"\n[SYSTEM] Контакт '{name}' удален по таймауту.")
-                self.contacts.pop(name)
+            to_delete = [n for n, info in self.contacts.items() if now - info['last_seen'] > 300]
+            for n in to_delete:
+                print(f"\n[SYSTEM] Контакт '{n}' удален (таймаут).")
+                self.contacts.pop(n)
 
     async def handle_incoming(self, reader, writer):
         peer = writer.get_extra_info('peername')
+        peer_ip = peer[0]
         try:
             while True:
                 data = await reader.read(8192)
@@ -47,14 +42,19 @@ class P2PWorker:
                 nickname = msg_dict.get("sender_id")
                 
                 if nickname:
-                    # Обновляем или добавляем контакт
+                    # Если у нас был временный контакт для этого IP, удаляем его
+                    temp_name = f"pending_{peer_ip}"
+                    if temp_name in self.contacts:
+                        self.contacts.pop(temp_name)
+
+                    # Сохраняем/обновляем нормальный контакт
                     self.contacts[nickname] = {
-                        "ip": peer[0],
-                        "port": msg_dict.get("sender_listen_port", peer[1]), # Берем РЕАЛЬНЫЙ порт из сообщения
+                        "ip": peer_ip,
+                        "port": msg_dict.get("sender_listen_port", peer[1]),
                         "pub_key": msg_dict.get("sender_pub_key"),
                         "last_seen": time.time()
                     }
-                
+
                 if msg_dict.get("encrypted_payload"):
                     msg = P2PMessage(**msg_dict)
                     decrypted = self.client.decrypt_symmetric(
@@ -66,7 +66,14 @@ class P2PWorker:
         except Exception: pass
         finally: writer.close()
 
-    async def send_message(self, target_ip: str, target_port: int, target_pub_key_b64: str, text: str, target_name="Unknown"):
+    async def send_to_contact(self, alias: str, text: str):
+        if alias not in self.contacts:
+            print(f"[!] Ошибка: Контакта '{alias}' нет в списке!")
+            return
+        c = self.contacts[alias]
+        await self.send_message(c["ip"], c["port"], c["pub_key"], text)
+
+    async def send_message(self, target_ip: str, target_port: int, target_pub_key_b64: str, text: str):
         target_id = f"{target_ip}:{target_port}"
         
         if target_id not in self.active_connections:
@@ -74,8 +81,8 @@ class P2PWorker:
                 reader, writer = await asyncio.open_connection(target_ip, target_port)
                 self.active_connections[target_id] = (reader, writer)
                 asyncio.create_task(self.handle_incoming(reader, writer))
-                # Сразу сохраняем того, к кому подключаемся
-                self.contacts[target_name] = {
+                # Создаем временный контакт, пока не узнали ник
+                self.contacts[f"pending_{target_ip}"] = {
                     "ip": target_ip, "port": target_port, "pub_key": target_pub_key_b64, "last_seen": time.time()
                 }
             except Exception as e:
@@ -89,8 +96,6 @@ class P2PWorker:
             encrypted_payload=self.client.encrypt_symmetric(target_id, base64.b64decode(target_pub_key_b64), text),
             type="text"
         )
-        
-        # Добавляем в JSON наш порт, чтобы получатель знал, куда отвечать
         data = payload.model_dump()
         data["sender_listen_port"] = self.port 
         
