@@ -1,4 +1,5 @@
 import asyncio
+import time
 import sys
 from client.p2p_worker import P2PWorker
 
@@ -12,39 +13,32 @@ async def main():
     # Запускаем сервер в фоне
     server_task = asyncio.create_task(worker.start())
 
-    print("\nКОМАНДЫ:")
-    print("1. connect <ip> <port> <key>  -- Подключиться к новому другу")
-    print("2. send <ник> <сообщение>     -- Отправить сообщение по нику")
-    print("3. exit                       -- Выход")
-    print("-" * 30)
+    print("КОМАНДЫ:")
+    print("connect <имя> <ip> <порт> <ключ>  -- Подключиться и дать имя")
+    print("list                             -- Показать активные контакты")
+    print("send <имя> <сообщение>           -- Отправить")
 
     try:
         while True:
-            # Читаем ввод пользователя асинхронно
             cmd_line = await asyncio.to_thread(input, f"[{user_id}] > ")
-            parts = cmd_line.strip().split(" ", 3)
-            
-            if not parts or not parts[0]:
-                continue
-                
-            command = parts[0].lower()
+            parts = cmd_line.strip().split(" ", 4)
+            if not parts: continue
+            cmd = parts[0].lower()
 
-            if command == "exit":
-                break
+            if cmd == "connect":
+                if len(parts) < 5: continue
+                name, ip, t_port, key = parts[1], parts[2], int(parts[3]), parts[4]
+                await worker.send_message(ip, t_port, key, "Запрос на связь", target_name=name)
+                print(f"[*] Вы добавили {name} в список и отправили запрос.")
 
-            elif command == "connect":
-                if len(parts) < 4:
-                    print("[!] Юзай: connect <ip> <port> <pub_key>")
-                    continue
-                ip, t_port, key = parts[1], int(parts[2]), parts[3]
-                # Шлем приветствие, чтобы другой узел нас узнал
-                await worker.send_message(ip, t_port, key, "Привет! Давай общаться.")
-                print("[*] Попытка подключения отправлена...")
+            elif cmd == "list":
+                print("\n--- СПИСОК КОНТАКТОВ ---")
+                for name, info in worker.contacts.items():
+                    seen_ago = int(time.time() - info['last_seen'])
+                    print(f"- {name} ({info['ip']}:{info['port']}) | Активен {seen_ago}с назад")
+                print("------------------------")
 
-            elif command == "send":
-                if len(parts) < 3:
-                    print("[!] Юзай: send <ник> <сообщение>")
-                    continue
+            elif cmd == "send":
                 alias, text = parts[1], " ".join(parts[2:])
                 await worker.send_to_contact(alias, text)
 
