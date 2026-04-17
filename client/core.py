@@ -54,12 +54,18 @@ class P2PClient:
 
     def decrypt_symmetric(self, sender_id: str, sender_pub_key_bytes: bytes, encrypted_b64: str):
         """Расшифровка симметричным ключом"""
-        key = self.get_shared_key(sender_pub_key_bytes) # Вычисляем тот же ключ
-        box = SecretBox(key)
+        # Вычисляем ОБЩИЙ секрет (Diffie-Hellman)
+        # Используем наш приватный ключ и ПУБЛИЧНЫЙ ключ того, кто прислал сообщение
+        box_helper = Box(self.private_key, PublicKey(sender_pub_key_bytes))
+        shared_key = box_helper.shared_key() 
+        
+        # Используем этот секрет в SecretBox
+        secret_box = SecretBox(shared_key)
         
         encrypted_data = base64.b64decode(encrypted_b64)
-        return box.decrypt(encrypted_data).decode()
-
+        # Расшифровываем (nonce уже внутри encrypted_data, если ты юзал box.encrypt)
+        return secret_box.decrypt(encrypted_data).decode('utf-8')
+    
     def cleanup_sessions(self):
         """Метод для очистки старых сессий (запускать по таймеру)"""
         now = time.time()

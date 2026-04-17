@@ -13,7 +13,7 @@ async def main():
         print("Ошибка: Порт должен быть числом.")
         return
 
-    node = P2PWorker("127.0.0.1", port, user_id)
+    node = P2PWorker("0.0.0.0", port, user_id)
 
     # Запускаем серверную часть в фоновом режиме
     server_task = asyncio.create_task(node.start())
