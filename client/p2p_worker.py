@@ -10,14 +10,14 @@ class P2PWorker:
         self.host = host
         self.port = port
         self.user_id = user_id
-        # Храним сокеты по НИКНЕЙМАМ
+        # Сокеты храним по никнеймам
         self.active_connections = {} 
         self.contacts = {} 
 
     async def start(self):
         server = await asyncio.start_server(self.handle_incoming, self.host, self.port)
         pub_key_str = base64.b64encode(self.client.public_key.encode()).decode()
-        print(f"\n[SYSTEM] Узел {self.user_id} запущен!")
+        print(f"\n[SYSTEM] Узел {self.user_id} на порту {self.port}")
         print(f"[SYSTEM] Ключ: {pub_key_str}\n" + "="*30)
         
         asyncio.create_task(self.cleanup_contacts())
@@ -38,28 +38,32 @@ class P2PWorker:
                 sender_nick = msg_dict.get("sender_id")
                 
                 if sender_nick:
-                    current_nick = sender_nick
-                    # ВАЖНО: Привязываем входящий сокет к нику
-                    self.active_connections[sender_nick] = writer
+                    # 1. Если это новый ник — регистрируем его в соединениях и контактах
+                    if sender_nick not in self.contacts:
+                        self.contacts[sender_nick] = {
+                            "ip": peer_ip,
+                            "port": msg_dict.get("sender_listen_port", peer[1]),
+                            "pub_key": msg_dict.get("sender_pub_key"),
+                            "last_seen": time.time()
+                        }
+                        self.active_connections[sender_nick] = writer
+                        print(f"\n[+] Новый контакт: {sender_nick} (@{peer_ip})")
+                        
+                        # 2. Если нам прислали handshake (первый раз), отвечаем своим handshake
+                        if msg_dict.get("type") == "handshake":
+                            # Отправляем инфо о себе в ответ
+                            resp = self.create_payload("Handshake ACK", sender_nick, msg_dict["sender_pub_key"], "handshake_reply")
+                            writer.write(resp)
+                            await writer.drain()
                     
-                    # Обновляем контакт (всегда используем ник как главный ID)
-                    self.contacts[sender_nick] = {
-                        "ip": peer_ip,
-                        "port": msg_dict.get("sender_listen_port", peer[1]),
-                        "pub_key": msg_dict.get("sender_pub_key"),
-                        "last_seen": time.time()
-                    }
-                    self.contacts.pop(f"pending_{peer_ip}", None)
+                    # Обновляем время активности
+                    self.contacts[sender_nick]["last_seen"] = time.time()
+                    self.active_connections[sender_nick] = writer
+                    current_nick = sender_nick
 
-                    # Авто-ответ на рукопожатие
-                    if msg_dict.get("type") == "handshake":
-                        resp = self.create_payload("Handshake ACK", sender_nick, msg_dict["sender_pub_key"], "handshake_reply")
-                        writer.write(resp)
-                        await writer.drain()
-
+                # 3. Обработка обычных сообщений
                 if msg_dict.get("type") == "text":
                     msg = P2PMessage(**msg_dict)
-                    # Дешифруем, используя ник как ID сессии
                     decrypted = self.client.decrypt_symmetric(
                         sender_nick, base64.b64decode(msg.sender_pub_key), msg.encrypted_payload
                     )
@@ -72,7 +76,7 @@ class P2PWorker:
             writer.close()
 
     def create_payload(self, text, target_id, target_pub_key, msg_type="text"):
-        # Используем target_id (ник) для ядра, чтобы сессия не сбрасывалась
+        # target_id здесь — это ник собеседника. Ядро будет использовать его для сессии.
         encrypted = self.client.encrypt_symmetric(target_id, base64.b64decode(target_pub_key), text)
         payload = P2PMessage(
             sender_id=self.user_id,
@@ -85,11 +89,9 @@ class P2PWorker:
 
     async def send_to_contact(self, alias: str, text: str):
         if alias not in self.contacts:
-            print(f"[!] Контакт {alias} не найден"); return
+            print(f"[!] Ошибка: Контакт {alias} не найден"); return
         
         c = self.contacts[alias]
-        
-        # ГЛАВНОЕ: Ищем уже открытый сокет (неважно, кто его открыл)
         writer = self.active_connections.get(alias)
         
         if writer and not writer.is_closing():
@@ -97,29 +99,27 @@ class P2PWorker:
                 packet = self.create_payload(text, alias, c["pub_key"], "text")
                 writer.write(packet)
                 await writer.drain()
-                return # Успешно отправили в существующий канал
             except Exception:
                 self.active_connections.pop(alias, None)
+                print("[!] Соединение потеряно.")
+        else:
+            print("[!] Ошибка: Соединение с контактом неактивно.")
 
-        # Если старого канала нет, создаем новый
-        await self.send_message(c["ip"], c["port"], c["pub_key"], text, is_handshake=False, target_name=alias)
-
-    async def send_message(self, ip, port, key, text, is_handshake=True, target_name=None):
+    async def send_initial_handshake(self, ip, port, key):
+        """Метод для команды connect: просто стучимся и шлем данные о себе"""
         try:
             reader, writer = await asyncio.open_connection(ip, port)
-            # Временно вешаем сокет на IP или имя
-            conn_id = target_name or f"pending_{ip}"
-            self.active_connections[conn_id] = writer
+            # Временно сохраняем сокет по IP, пока не узнаем ник в handle_incoming
+            temp_id = f"conn_{ip}" 
+            self.active_connections[temp_id] = writer
             asyncio.create_task(self.handle_incoming(reader, writer))
             
-            # Если это первый коннект, создаем временный контакт
-            if is_handshake and not target_name:
-                self.contacts[conn_id] = {"ip": ip, "port": port, "pub_key": key, "last_seen": time.time()}
-
-            msg_type = "handshake" if is_handshake else "text"
-            packet = self.create_payload(text, target_name or "unknown", key, msg_type)
+            # Шлем handshake. ID сессии в ядре пока ставим "initial", 
+            # так как мы еще не знаем ник получателя.
+            packet = self.create_payload("HELLO", "initial", key, "handshake")
             writer.write(packet)
             await writer.drain()
+            print(f"[*] Запрос отправлен на {ip}:{port}...")
         except Exception as e:
             print(f"[!] Ошибка подключения: {e}")
 
@@ -129,5 +129,6 @@ class P2PWorker:
             now = time.time()
             to_delete = [n for n, i in self.contacts.items() if now - i['last_seen'] > 300]
             for n in to_delete:
+                print(f"\n[SYSTEM] Контакт '{n}' удален за неактивность.")
                 self.contacts.pop(n, None)
                 self.active_connections.pop(n, None)

@@ -33,8 +33,8 @@ async def main():
                     print("[!] Юзай: connect <ip> <port> <pub_key>")
                     continue
                 ip, t_port, key = parts[1], int(parts[2]), parts[3]
-                await worker.send_message(ip, t_port, key, "Запрос на соединение", is_handshake=True)
-                print(f"[*] Инициализация связи с {ip}...")
+                # Вызываем метод, который просто шлет визитку
+                await worker.send_initial_handshake(ip, t_port, key)
 
             elif cmd == "list":
                 print("\n--- ТВОИ КОНТАКТЫ ---")
