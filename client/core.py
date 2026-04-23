@@ -6,16 +6,26 @@ from nacl.secret import SecretBox
 from nacl.utils import random
 
 from pydantic import BaseModel
+from enum import Enum
+from typing import Any
+
+import asyncio
+
+class MessageType(Enum):
+    default = 'text'
+    make_session = 'make_session'
+    ack_session = 'ack_session'
 
 class Session(BaseModel):
     shared_key: bytes
     last_activity: float
+    writer: Any
 
 class P2PMessage(BaseModel):
-    sender_id: str          
+    sender_id: int          
     sender_pub_key: str     
-    encrypted_payload: str  
-    type: str = "text"
+    payload: str  
+    type: str
 
 class P2PClient:
     def __init__(self):
@@ -26,29 +36,33 @@ class P2PClient:
         self.sessions: dict[str, Session]= {}
         self.SESSION_TIMEOUT = 300
 
-    def get_shared_key(self, recipient_pub_key_bytes: bytes):
-        """Алгоритм Диффи-Хеллмана для получения общего ключа"""
-        recipient_pub_key = PublicKey(recipient_pub_key_bytes)
-        # Генерируем общий секрет на основе двух пар ключей
-        shared_box = Box(self.private_key, recipient_pub_key)
-        # shared_key — это производное от секрета, используем его для симметрии
-        return shared_box.shared_key()
+    def assymetric_box(self, sender_pub_key_bytes: bytes):
+        return Box(self.private_key, PublicKey(sender_pub_key_bytes))
     
+    def add_symmetric_session(self, recipient_id: str, writer: asyncio.StreamWriter, key: bytes = None):
+        now = time.time()
+        print(f"[*] Добавление новой симметричной сессии для {recipient_id}")
+        if key is None: key = random(SecretBox.KEY_SIZE)
+        print(key)
+        self.sessions[recipient_id] = Session(
+            shared_key=key, 
+            last_activity=now,
+            writer=writer
+            )
+        
+
     def encrypt_symmetric(self, recipient_id: str, pub_key_bytes: bytes, text: str):
         """Шифрование быстрым симметричным алгоритмом"""
         # Если сессии нет или она протухла — создаем новую
         now = time.time()
         if recipient_id not in self.sessions or (now - self.sessions[recipient_id].last_activity) > self.SESSION_TIMEOUT:
-            print(f"[*] Установка новой симметричной сессии для {recipient_id}")
-            key = self.get_shared_key(pub_key_bytes)
-            self.sessions[recipient_id] = Session(shared_key=key, last_activity=now)
+            self.add_symmetric_session(recipient_id, pub_key_bytes)
         
         session = self.sessions[recipient_id]
         session.last_activity = now # Обновляем время активности
         
         box = SecretBox(session.shared_key)
-        nonce = random(SecretBox.NONCE_SIZE)
-        encrypted = box.encrypt(text.encode(), nonce)
+        encrypted = box.encrypt(text)
         
         return base64.b64encode(encrypted).decode()
 

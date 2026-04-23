@@ -11,7 +11,7 @@ async def main():
     server_task = asyncio.create_task(worker.start())
 
     print("\nКОМАНДЫ:")
-    print("1. connect <ip> <port> <key>  -- Подключиться (ник узнается сам)")
+    print("1. connect <ip> <port> -- Подключиться (ник узнается сам)")
     print("2. list                       -- Показать контакты")
     print("3. send <ник> <сообщение>      -- Отправить по нику")
     print("4. exit                       -- Выход")
@@ -29,28 +29,13 @@ async def main():
                 break
 
             elif cmd == "connect":
-                if len(parts) < 4:
-                    print("[!] Юзай: connect <ip> <port> <pub_key>")
-                    continue
-                ip, t_port, key = parts[1], int(parts[2]), parts[3]
-                # Вызываем метод, который просто шлет визитку
-                await worker.send_initial_handshake(ip, t_port, key)
-
-            elif cmd == "list":
-                print("\n--- ТВОИ КОНТАКТЫ ---")
-                if not worker.contacts:
-                    print("Список пуст.")
-                for name, info in worker.contacts.items():
-                    seen_ago = int(time.time() - info['last_seen'])
-                    print(f"- {name} [{info['ip']}:{info['port']}] (активен {seen_ago}с назад)")
-                print("-" * 25)
-
-            elif cmd == "send":
                 if len(parts) < 3:
-                    print("[!] Юзай: send <ник> <сообщение>")
+                    print("[!] Юзай: connect <ip> <port>")
                     continue
-                alias, text = parts[1], " ".join(parts[2:])
-                await worker.send_to_contact(alias, text)
+                ip, t_port = parts[1], int(parts[2])
+                # Вызываем метод, который просто шлет визитку
+                await worker.send_initial_handshake(ip, t_port)
+
 
     except Exception as e:
         print(f"[!] Ошибка: {e}")
